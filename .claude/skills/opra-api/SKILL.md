@@ -1,403 +1,714 @@
 ---
 name: opra-api
 description: >
-  OPRA (Open Protocol for Rich APIs) ile backend API geliştirirken kullan.
-  Controller oluşturma, operasyon tanımlama, filtre/sıralama, dosya yükleme,
-  nested controller, parametre yönetimi ve response yapılandırması için tetikle.
+  OPRA (Open Protocol for Rich APIs) ile NestJS backend API gelistirirken kullan.
+  Controller olusturma, CRUD operasyonlar, filtre/siralama, entity/DTO tanimlama,
+  service katmani, interceptor, transaction, context yonetimi ve module kaydi icin tetikle.
+user-invocable: true
+allowed-tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 
-# OPRA API Geliştirme Kılavuzu
+# OPRA API Gelistirme Kilavuzu
 
-OPRA, TypeScript decorator'ları ile HTTP API tanımlamayı standartlaştıran bir framework'tür.
-Temel paketler: `@opra/common` (decorator'lar, tipler), `@opra/http` (HttpContext, adapter).
+Bu skill, OPRA + NestJS + SQB stack'i ile API gelistirirken uyulmasi gereken tum kalip ve konvansiyonlari icerir.
 
 ---
 
-## 1. Controller Türleri
+## 1. PROJE YAPISI
 
-OPRA'da üç temel controller kalıbı vardır:
+```
+packages/<app-name>/src/
+  modules/
+    api/
+      api.module.ts                       # OpraHttpModule kaydi
+      controllers/
+        <resource>/
+          <resource>.controller.ts        # Collection (FindMany, Create)
+          <resource>-single.controller.ts # Single (Get, Update, Delete)
+          dto/
+            create-<resource>-in.dto.ts
+            update-<resource>-in.dto.ts
+            index.ts
+          index.ts
+        healthz.controller.ts             # Health check (public)
+        index.ts                          # Tum controller barrel export
+    services/
+      services.module.ts                  # Global service module
+      services/
+        <resource>.service.ts
+        index.ts
+  core/
+    config/                               # Joi config schemalari
+    constants/
+```
 
-### Collection Controller — Kayıt listesi yöneten
+---
 
-```ts
-import { HttpController, HttpOperation, OmitType, OperationResult } from '@opra/common';
+## 2. ENTITY TANIMLAMA
+
+Entity dosyalari `packages/data-models/src/entities/` altinda bulunur. Her entity hem ORM (`@sqb/connect`) hem API dokumantasyonu (`@opra/common`) dekoratorlerini birlikte kullanir.
+
+### Temel Entity Ornegi
+
+```typescript
+import { ApiField, ComplexType, StringType } from '@opra/common';
+import { Column, DataType, Entity, PrimaryKey } from '@sqb/connect';
+
+@ComplexType({ description: 'Account' })
+@Entity('accounts')
+export class EntityAccount {
+  @PrimaryKey()
+  @Column({ fieldName: 'id', dataType: DataType.GUID, noInsert: true })
+  @ApiField({ type: 'uuid', required: false, readonly: true })
+  declare id: string;
+
+  @Column({ fieldName: 'name', dataType: DataType.TEXT })
+  @ApiField({ type: new StringType({ maxLength: 128 }), required: true })
+  declare name: string;
+
+  @Column({ fieldName: 'created_date', dataType: DataType.TIMESTAMP })
+  @ApiField({ type: 'DateTime' })
+  declare createdDate: Date;
+
+  // Virtual field - veritabaninda yok, service tarafindan doldurulur
+  @ApiField({ type: 'integer', required: false, readonly: true })
+  declare tenantCount?: number;
+}
+```
+
+### Kurallar
+
+| Konu | Konvansiyon |
+|------|-------------|
+| Sinif adi | `Entity<PascalCase>` (ornek: `EntityAccount`, `EntityUser`) |
+| Tablo adi | snake_case, cogul (`accounts`, `tenant_apps`) |
+| TypeScript property | camelCase (`createdDate`, `accountId`) |
+| DB column | snake_case (`created_date`, `account_id`) — `fieldName` ile belirtilir |
+| Primary key | `@PrimaryKey()` + `noInsert: true` (auto-generated GUID) |
+| PK disaridan ataniyorsa | `noInsert: false` (ornek: User.id Keycloak'tan gelir) |
+| Property tanimi | `declare` keyword kullan (class field olarak) |
+
+### Desteklenen DataType'lar
+
+- `DataType.GUID` — UUID alanlar
+- `DataType.TEXT` — String alanlar
+- `DataType.TIMESTAMP` — Tarih/saat
+- `DataType.BOOL` — Boolean
+- `DataType.INTEGER` — Sayi
+
+### Desteklenen ApiField Type'lari
+
+- `'uuid'` — UUID format
+- `'email'` — Email format
+- `'DateTime'` — Tarih/saat
+- `'integer'` — Tamsayi
+- `'boolean'` — Boolean
+- `new StringType({ maxLength: N })` — Uzunluk kisitli string
+- `new BooleanType()` — Boolean tipi
+- `'EnumAdi'` — Tanimlanmis enum referansi (string olarak)
+
+### Iliskiler (Link)
+
+```typescript
+import { Link } from '@sqb/connect';
+
+@ApiField({ readonly: true })
+@(Link({ exclusive: true }).toOne(EntityAccount, {
+  sourceKey: 'accountId',
+  targetKey: 'id',
+}))
+declare account: EntityAccount;
+```
+
+- `Link.toOne()` ile one-to-one iliski tanimlanir
+- `exclusive: true` kullanilir
+- `sourceKey`: bu entity'deki FK alani
+- `targetKey`: hedef entity'deki PK alani
+- `@ApiField({ readonly: true })` ile isaret edilir
+
+### Array Alanlar
+
+```typescript
+@Column({ fieldName: 'roles', dataType: DataType.TEXT, isArray: true })
+@ApiField({ type: 'UserAccountRole', isArray: true })
+declare roles: UserAccountRole[];
+```
+
+---
+
+## 3. ENUM TANIMLAMA
+
+```typescript
+import { EnumType } from '@opra/common';
+
+export enum InvitationStatus {
+  PENDING = 'PENDING',
+  ACCEPTED = 'ACCEPTED',
+  REJECTED = 'REJECTED',
+  EXPIRED = 'EXPIRED',
+}
+
+EnumType(InvitationStatus, {
+  name: 'InvitationStatus',
+  meanings: {
+    PENDING: 'Pending',
+    ACCEPTED: 'Accepted',
+    REJECTED: 'Rejected',
+    EXPIRED: 'Expired',
+  },
+});
+```
+
+- Enum sinifi tanimlandiktan sonra `EnumType()` fonksiyonu ile OPRA'ya kayit edilir
+- `meanings` objesi her enum degerinin okunabilir aciklamasini icerir
+
+---
+
+## 4. DTO TANIMLAMA
+
+DTO dosyalari controller'in `dto/` klasorunde bulunur. `@ComplexType` ve `@ApiField` dekoratorleri kullanilir.
+
+```typescript
+import { ApiField, ComplexType, StringType } from '@opra/common';
+
+@ComplexType()
+export class CreateAccountInDto {
+  @ApiField({ type: new StringType({ maxLength: 128 }), required: true })
+  declare name: string;
+}
+```
+
+```typescript
+@ComplexType()
+export class CreateInvitationInDto {
+  @ApiField({ type: 'uuid', required: true })
+  declare accountId: string;
+
+  @ApiField({ type: 'email', required: true })
+  declare email: string;
+
+  @ApiField({ type: new StringType({ maxLength: 32 }), required: true })
+  declare firstName: string;
+
+  @ApiField({ type: new StringType({ maxLength: 32 }), required: true })
+  declare lastName: string;
+}
+```
+
+### DTO Konvansiyonlari
+
+- Input DTO isimlendirme: `Create<Resource>InDto`, `Update<Resource>InDto`
+- `@ComplexType()` dekoratoru zorunlu
+- `declare` keyword ile property tanimla
+- DTO'lar `api.module.ts`'deki `types` dizisine eklenmelidir
+
+---
+
+## 5. CONTROLLER TANIMLAMA
+
+Iki tip controller vardir: **Collection** (liste + create) ve **Single** (get + update + delete).
+
+### 5.1 Collection Controller (FindMany + Create)
+
+```typescript
+import { HttpController, HttpOperation, OperationResult } from '@opra/common';
 import { HttpContext } from '@opra/http';
+import { SQBAdapter } from '@opra/sqb';
 
 @HttpController({
-  path: 'Customers',         // URL: /Customers
-  description: 'Müşteriler',
+  path: 'accounts',
+  description: 'Accounts',
 })
-export class CustomersController {
+export class AccountController {
+  constructor(private readonly accountService: AccountService) {}
 
-  @HttpOperation.Entity.Create(Customer, {
-    requestBody: { type: OmitType(Customer, ['_id']) },
-  })
-  async create(context: HttpContext) { ... }
+  @(HttpOperation.Entity.FindMany(EntityAccount)
+    .Filter('id', ['=', '!=', 'in', '!in'])
+    .Filter('name', ['=', '!=', 'in', '!in'])
+    .Filter('createdDate', ['=', '!=', 'in', '!in', '>', '<', '>=', '<=']))
+  async findMany(ctx: HttpContext) {
+    const { options } = await SQBAdapter.parseRequest(ctx);
+    if (!options.count) {
+      return this.service.for(ctx).findMany(options);
+    }
+    const { items, count } = await this.service
+      .for(ctx)
+      .findManyWithCount(options);
+    return new OperationResult({ payload: items, totalMatches: count });
+  }
 
-  @(HttpOperation.Entity.FindMany(Customer)
-    .Filter('name', ['=', '!=', 'like', '!like'])
-    .SortFields('_id', 'name', 'createdAt')
-    .DefaultSort('name'))
-  async findMany(context: HttpContext) { ... }
-
-  @HttpOperation.Entity.UpdateMany(Customer)
-  async updateMany(context: HttpContext) { ... }
-
-  @HttpOperation.Entity.DeleteMany(Customer)
-  async deleteMany(context: HttpContext) { ... }
+  @HttpOperation.Entity.Create(EntityAccount)
+  async create(ctx: HttpContext) {
+    const body = await ctx.getBody<Partial<EntityAccount>>();
+    return this.accountService.for(ctx).create(body as any);
+  }
 }
 ```
 
-### Singleton/Entity Controller — Tekil kaynak yöneten
+### 5.2 Single Controller (Get + Update + Delete)
 
-`KeyParam` URL'e `@:paramAdi` ekler: `/Customers@:customerId`
-
-```ts
+```typescript
 @(HttpController({
-  path: 'Customers',
-}).KeyParam('customerId', 'number'))   // → /Customers@:customerId
-export class CustomerController {
+  path: 'account',
+  description: 'Single Account',
+}).KeyParam('id'))
+export class AccountSingleController {
+  constructor(private readonly accountService: AccountService) {}
 
-  @HttpOperation.Entity.Get(Customer)
-  async get(context: HttpContext) { ... }
-
-  @HttpOperation.Entity.Update(Customer)
-  async update(context: HttpContext) { ... }
-
-  @HttpOperation.Entity.Delete(Customer)
-  async delete(context: HttpContext) { ... }
-}
-```
-
-### Custom Controller — Serbest endpoint'ler
-
-```ts
-@HttpController({ path: 'auth', description: 'Kimlik doğrulama' })
-export class AuthController {
-
-  @(HttpOperation({ path: 'login' })
-    .QueryParam('user', String)
-    .QueryParam('password', 'string')
-    .Response(200, { type: OperationResult }))
-  async login(context: HttpContext) {
-    return new OperationResult({ message: 'Giriş başarılı' });
+  @HttpOperation.Entity.Get(EntityAccount)
+  async getById(ctx: HttpContext) {
+    const { key, options } = await SQBAdapter.parseRequest(ctx);
+    return this.accountService
+      .for(ctx)
+      .findOne({ filter: { id: key }, ...options });
   }
 
-  @(HttpOperation({ path: '/logout' })
-    .Response(200, { type: OperationResult }))
-  async logout() {
-    return new OperationResult({ message: 'Çıkış yapıldı' });
+  @HttpOperation.Entity.Update(EntityAccount)
+  async updateById(ctx: HttpContext) {
+    const { key } = await SQBAdapter.parseRequest(ctx);
+    const body = await ctx.getBody<Partial<EntityAccount>>();
+    return this.accountService.for(ctx).update(key, body);
+  }
+
+  @HttpOperation.Entity.Delete(EntityAccount)
+  async deleteById(ctx: HttpContext) {
+    const { key } = await SQBAdapter.parseRequest(ctx);
+    return await this.accountService.for(ctx).delete(key);
   }
 }
 ```
 
----
+### 5.3 Custom (Non-CRUD) Operasyonlar
 
-## 2. @HttpController Seçenekleri
+```typescript
+@HttpController({ path: 'authz' })
+export class AuthzController {
+  constructor(private userService: UserService) {}
 
-```ts
-@HttpController({
-  path: 'Customers',          // URL path segmenti (zorunlu)
-  name: 'Customers',          // İsim (yoksa sınıf adından otomatik türetilir)
-  description: 'Açıklama',   // API dokümantasyonu için
-  controllers: [              // Nested (alt) controller'lar
-    (parent: ParentCtrl) => new ChildController(parent.db),
-  ],
-})
-```
-
-**Zincirlenebilir metotlar** — class seviyesinde tüm operasyonlara uygulanır:
-
-| Metot | Açıklama |
-|-------|----------|
-| `.Header('name', type)` | Header parametresi tanımla |
-| `.QueryParam('name', type)` | Query string parametresi |
-| `.PathParam('name', type)` | Path parametresi (`/path/:name`) |
-| `.KeyParam('name', type)` | Birincil anahtar parametresi (`/path@:name`) |
-| `.Cookie('name', type)` | Cookie parametresi |
-| `.UseType(SomeClass)` | Bu controller'da kullanılacak ek tipleri kaydet |
-
-> **İsim kuralı:** `CustomersController` → isim `Customers` olarak otomatik alınır.
-
----
-
-## 3. Entity Operasyonları
-
-`HttpOperation.Entity.*` — REST kaynak operasyonları için hazır decorator'lar:
-
-| Decorator | HTTP Metodu | Açıklama |
-|-----------|-------------|----------|
-| `Entity.Create(Type, opts)` | POST | Yeni kayıt oluştur |
-| `Entity.Get(Type)` | GET | Tek kayıt getir |
-| `Entity.FindMany(Type)` | GET | Liste getir |
-| `Entity.Update(Type)` | PATCH | Kısmi güncelle |
-| `Entity.Replace(Type)` | PUT | Tam güncelle |
-| `Entity.Delete(Type)` | DELETE | Tek kayıt sil |
-| `Entity.UpdateMany(Type)` | PATCH | Toplu güncelle |
-| `Entity.DeleteMany(Type)` | DELETE | Toplu sil |
-
----
-
-## 4. Filtre ve Sıralama
-
-`FindMany`, `UpdateMany`, `DeleteMany` üzerinde kullanılır:
-
-```ts
-@(HttpOperation.Entity.FindMany(Customer)
-  // Alan adı + izin verilen operatörler
-  .Filter('_id',      ['=', '!=', '<', '>', '>=', '<=', 'in', '!in'])
-  .Filter('name',     ['=', '!=', 'like', '!like', 'ilike', '!ilike'])
-  .Filter('status')   // Operatör belirtilmezse sadece '=' kabul edilir
-  .Filter('active')
-  // Sıralanabilir alanlar
-  .SortFields('_id', 'name', 'createdAt')
-  // Varsayılan sıralama
-  .DefaultSort('name'))
-async findMany(context: HttpContext) { ... }
-```
-
-**Desteklenen filtre operatörleri:**
-- Eşitlik: `=`, `!=`
-- Karşılaştırma: `<`, `>`, `>=`, `<=`
-- Liste: `in`, `!in`
-- Metin: `like`, `!like`, `ilike` (case-insensitive), `!ilike`
-
----
-
-## 5. Parametre Tanımlama
-
-Hem `@HttpController` hem de `@HttpOperation` üzerinde aynı API ile çalışır:
-
-```ts
-// Operasyon seviyesinde
-@(HttpOperation({ path: 'search' })
-  .QueryParam('q', String)                           // Tip: String constructor
-  .QueryParam('limit', 'number')                     // Tip: string olarak
-  .QueryParam('active', { type: Boolean, required: true })  // Options objesi
-  .PathParam('id', 'number')
-  .Header('Authorization', String)
-  .Cookie('sessionId', 'string'))
-async search(context: HttpContext) {
-  const { q, limit } = context.queryParams;
-  const { id } = context.pathParams;
-  const auth = context.headers['Authorization'];
-}
-```
-
----
-
-## 6. HttpContext — İstek Verilerine Erişim
-
-Her operasyon metodunun tek parametresi `context: HttpContext`'tir:
-
-```ts
-async myMethod(context: HttpContext) {
-  // Parametreler
-  context.pathParams.customerId   // Path parametresi
-  context.queryParams.limit       // Query parametresi
-  context.headers['x-token']      // Header
-  context.cookies.session         // Cookie
-
-  // Body
-  const body = await context.getBody<MyType>();   // JSON body
-
-  // Multipart (dosya yükleme)
-  const reader = await context.getMultipartReader();
-  const parts = await reader.getAll();
-
-  // Ham request/response
-  context.request    // HttpIncoming
-  context.response   // HttpOutgoing
-
-  // Hata biriktirme
-  context.errors.push(new Error('...'));
-}
-```
-
----
-
-## 7. Nested (İç İçe) Controller
-
-Alt controller'lar `controllers` array'i ile tanımlanır.
-Parent'ın `KeyParam`'ı alt controller URL'inde de geçerlidir.
-
-```ts
-// Parent controller: /Customers@:customerId
-@(HttpController({
-  path: 'Customers',
-  controllers: [
-    (parent: CustomerController) => new CustomerNotesController(parent.db),
-  ],
-}).KeyParam('customerId', 'number'))
-export class CustomerController { ... }
-
-// Child controller: /Customers@:customerId/Notes
-@HttpController({ path: 'Notes' })
-export class CustomerNotesController {
-
-  // KeyParam operasyon seviyesinde de tanımlanabilir:
-  @(HttpOperation.Entity.Get(Note).KeyParam('_id', Number))
-  async get(context: HttpContext) {
-    // Parent path param'ına erişim:
-    const customerId = context.pathParams.customerId;
-    const noteId = context.pathParams._id;
-    ...
-  }
-
-  @(HttpOperation.Entity.FindMany(Note)
-    .SortFields('_id', 'title')
-    .DefaultSort('_id')
-    .Filter('_id')
-    .Filter('title'))
-  async findMany(context: HttpContext) {
-    const customerId = context.pathParams.customerId;
-    ...
-  }
-}
-```
-
----
-
-## 8. Dosya Yükleme (Multipart)
-
-```ts
-import { HttpOperation } from '@opra/common';
-import { HttpContext, MultipartReader } from '@opra/http';
-
-@(HttpController({ path: 'avatar' }).UseType(AvatarMetadata))
-export class AvatarController {
-
-  @(HttpOperation.POST({})
-    .MultipartContent({}, content => {
-      content.Field('name',     { type: String, required: true });
-      content.Field('metadata', { type: AvatarMetadata });
-      content.File('image',     { contentType: 'image/*', required: true });
-    })
-    .Response(200, { type: AvatarMetadata }))
-  async upload(context: HttpContext) {
-    const reader = await context.getMultipartReader();
-    const parts  = await reader.getAll();
-
-    const imagePart = parts.find(p => p.field === 'image') as MultipartReader.FileInfo;
-    const namePart  = parts.find(p => p.field === 'name')  as MultipartReader.FieldInfo;
-    // imagePart.stream — dosya stream'i
-    // namePart.value   — alan değeri
-  }
-}
-```
-
----
-
-## 9. Response Yapılandırma
-
-```ts
-@(HttpOperation({ path: 'report' })
-  .Response(200, {
-    type: ReportResult,
-    description: 'Başarılı',
-    contentType: 'application/json',
+  @Public()
+  @(HttpOperation.POST({
+    path: 'pre-register',
   })
-  .Response(422, {
-    description: 'Doğrulama hatası',
-    contentType: 'application/opra+json',
-  }))
-async getReport(context: HttpContext) {
-  return new OperationResult({
-    payload: items,
-    totalMatches: count,
-    message: 'OK',
+    .RequestContent(PreRegisterInDto)
+    .UseType(PreRegisterInDto))
+  async preRegister(ctx: HttpContext) {
+    const body = await ctx.getBody<PreRegisterInDto>();
+    // ...
+    return new OperationResult({ message: 'Success', payload: result });
+  }
+}
+```
+
+Diger HTTP metodlari: `HttpOperation.GET({})`, `HttpOperation.POST({})`, `HttpOperation.PUT({})`, `HttpOperation.DELETE({})`
+
+### 5.4 Health Check Controller (Public Endpoints)
+
+```typescript
+import { Public as OpraPublic } from '@opra/nestjs';
+import { Public } from '@panates-prv/account-core';
+
+@HttpController({ path: 'healthz' })
+export class HealthCheckController {
+  @HttpOperation.GET({ path: 'liveness' })
+  @OpraPublic()
+  @Public()
+  async liveness() {
+    return { status: 'ok', version: PACKAGE_VERSION, time: new Date().toISOString() };
+  }
+}
+```
+
+**Public endpointler icin iki `@Public()` dekoratoru birlikte kullanilir:**
+- `@Public()` from `@panates-prv/account-core` — JWT guard'i bypass eder
+- `@OpraPublic()` from `@opra/nestjs` — OPRA schema'da public olarak isaretler
+
+### Controller Konvansiyonlari
+
+| Konu | Konvansiyon |
+|------|-------------|
+| Collection path | Cogul (`accounts`, `users`, `invitations`) |
+| Single path | Tekil (`account`, `user`, `invitation`) |
+| KeyParam | Genelde `'id'` (UUID), bazi durumlarda `'code'` veya `'token'` |
+| Constructor injection | `private readonly <service>Service: <Service>Service` |
+| Her metod parametresi | `ctx: HttpContext` |
+| Service cagirma | **Her zaman** `.for(ctx)` ile context bagla |
+| Body okuma | `await ctx.getBody<Type>()` |
+| Key (URL param) okuma | `const { key } = await SQBAdapter.parseRequest(ctx)` |
+| Query params | `const { options } = await SQBAdapter.parseRequest(ctx)` |
+| User bilgisi | `ctx.user?.id`, `ctx.user?.email` |
+| Request params | `ctx.request.params?.paramName` |
+
+### Filter Operatorleri
+
+| Tip | Operatorler |
+|-----|-------------|
+| String/UUID | `['=', '!=', 'in', '!in']` |
+| Date/Timestamp | `['=', '!=', 'in', '!in', '>', '<', '>=', '<=']` |
+| Number | `['=', '!=', 'in', '!in', '>', '<', '>=', '<=']` |
+
+### Pagination Kaliplari
+
+`SQBAdapter.parseRequest(ctx)` otomatik olarak query parametrelerinden su alanlari cikarir:
+- `limit` — sayfa basina kayit sayisi
+- `offset` / `skip` — baslangic pozisyonu
+- `count` — toplam kayit sayisi dahil edilsin mi (boolean)
+- `projection` — dondurulecek alanlar
+- `sort` — siralama
+- `filter` — filtre ifadeleri
+
+`options.count` true ise `findManyWithCount()`, degilse `findMany()` kullanilir.
+
+---
+
+## 6. SERVICE KATMANI
+
+### 6.1 Temel Service
+
+```typescript
+import { Injectable } from '@nestjs/common';
+import { SqbCollectionService } from '@opra/sqb';
+import { SqbClient } from '@sqb/connect';
+
+@Injectable()
+export class UserService extends SqbCollectionService<EntityUser> {
+  constructor(private readonly sqbClient: SqbClient) {
+    super(EntityUser, { db: sqbClient });
+  }
+}
+```
+
+Miras alinan CRUD metodlari:
+- **Read:** `findOne()`, `findById()`, `findMany()`, `findManyWithCount()`, `count()`, `exists()`
+- **Create:** `create()`, `createOnly()`
+- **Update:** `update()`, `updateOnly()`, `updateMany()`
+- **Delete:** `delete()`, `deleteMany()`
+
+### 6.2 Custom Is Mantigi Eklemek
+
+```typescript
+@Injectable()
+export class AccountService extends SqbCollectionService<EntityAccount> {
+  constructor(
+    private readonly sqbClient: SqbClient,
+    private readonly tenantService: TenantService,
+    private readonly accountUserService: AccountUserService,
+  ) {
+    super(EntityAccount, { db: sqbClient });
+  }
+
+  async createAccountWithUser(accountData: Partial<EntityAccount>, userId: string) {
+    const account = await this.create(accountData as any);
+    await this.accountUserService.for(this.context).create({
+      accountId: account.id,
+      userId: userId,
+      roles: [UserAccountRole.SystemAdmin],
+    } as any);
+    return account;
+  }
+}
+```
+
+**Kritik:** Baska bir service cagirilirken `.for(this.context)` ile context aktarilmalidir.
+
+### 6.3 Interceptor (Otomatik Filtre)
+
+Tum read/update/delete operasyonlarina otomatik filtre uygulamak icin kullanilir. Multi-tenant ve yetkilendirme icin ideal.
+
+```typescript
+interceptor(
+  next: () => any,
+  command: SqbEntityService.CommandInfo,
+): Promise<any> {
+  if (command.method === 'create') {
+    return next(); // create'de filtre uygulanmaz
+  }
+
+  if (!command.options) command.options = {};
+
+  command.options.filter = And(
+    command.options.filter,
+    Exists(
+      Select('*')
+        .from('account_users ac')
+        .where(
+          And(
+            Eq('ac.account_id', Field('T.id')),
+            Eq('ac.user_id', (this.context as HttpContext).user?.id),
+          ),
+        ),
+    ),
+  );
+
+  return next();
+}
+```
+
+- `command.method`: `'create'`, `'findOne'`, `'findMany'`, `'update'`, `'delete'` vb.
+- `command.options.filter`: Mevcut filtre ile `And()` ile birlestirilir
+- `T` alias'i mevcut entity tablosunu temsil eder
+
+### 6.4 Lifecycle Hook'lari
+
+#### `_beforeCreate` — Insert oncesi veri donusumu
+
+```typescript
+protected async _beforeCreate(
+  command: SqbEntityService.CreateCommand<EntityTenantApp>,
+): Promise<void> {
+  const input = command.input as Partial<EntityTenantApp>;
+  if (input?.createdDate) {
+    const subscriptionEndDate = new Date(input.createdDate);
+    subscriptionEndDate.setMonth(subscriptionEndDate.getMonth() + 12);
+    input.subscriptionEndDate = subscriptionEndDate;
+  }
+  await super._beforeCreate(command);
+}
+```
+
+#### `_create` — Tum create islemini override etme + Transaction
+
+```typescript
+protected _create(
+  command: SqbEntityService.CreateCommand<EntityTenant>,
+): Promise<EntityTenant> {
+  return this.withTransaction(async () => {
+    const result = (await super._create(command)) as EntityTenant;
+    // ek is mantigi (migration, schema olusturma vb.)
+    return result;
   });
 }
 ```
 
+Mevcut lifecycle hook'lari:
+- `_beforeCreate(command)` / `_create(command)` / `_afterCreate(command, result)`
+- `_beforeUpdate(command)` / `_update(command)` / `_afterUpdate(command, result)`
+- `_beforeDelete(command)` / `_delete(command)` / `_afterDelete(command, result)`
+
+### 6.5 SQB Query Builder Kullanimi
+
+```typescript
+import { op } from '@sqb/builder';
+
+// Basit filtre (obje syntax)
+await this.findOne({ filter: { id: key } });
+await this.findOne({ filter: { email: data.email, status: 'ACTIVE' } });
+
+// Karmasik filtre (builder syntax)
+await this.findOne({
+  filter: op.and(
+    op.eq('email', data.email),
+    op.eq('accountId', data.accountId),
+    op.in('status', [InvitationStatus.PENDING, InvitationStatus.EXPIRED]),
+  ),
+});
+
+// Interceptor icinde subquery
+import { And, Eq, Exists, Field, Select } from '@sqb/builder';
+
+Exists(
+  Select('*')
+    .from('account_users ac')
+    .where(And(
+      Eq('ac.account_id', Field('T.id')),
+      Eq('ac.user_id', userId),
+    ))
+);
+```
+
+### 6.6 Transaction
+
+```typescript
+return this.withTransaction(async () => {
+  const result = await super._create(command);
+  // ek islemler...
+  return result;
+});
+```
+
+Hata durumunda tum islemler otomatik rollback olur.
+
+### 6.7 Context Erisimi
+
+```typescript
+// Service icinde mevcut kullanici bilgisi
+const user = (this.context as HttpContext)?.user;
+const userId = (this.context as HttpContext).user?.id;
+
+// Baska service'e context aktarimi
+await this.accountUserService.for(this.context).create({...});
+await this.tenantService.for(this).count({...}); // this da gecerli
+```
+
 ---
 
-## 10. OperationResult
+## 7. MODULE KAYDI
 
-Liste sonuçları veya mesaj döndürmek için kullanılır:
+### 7.1 Services Module
 
-```ts
+```typescript
+import { Global, Module } from '@nestjs/common';
+import * as services from './services/index.js';
+
+@Module({
+  imports: [EmailModule],       // Bagimli moduller
+  providers: Object.values(services),
+  exports: Object.values(services),
+})
+@Global()
+export class ServicesModule {}
+```
+
+- `@Global()` ile tum uygulama genelinde erisim saglanir
+- Barrel export (`index.ts`) uzerinden dinamik kayit
+
+### 7.2 API Module
+
+```typescript
+import { OpraHttpModule } from '@opra/nestjs-http';
+import { models } from '@panates-prv/account-data-models';
+import * as controllers from './controllers/index.js';
+
+@Module({
+  imports: [
+    PassportModule.register({ defaultStrategy: 'jwt' }),
+    OpraHttpModule.forRoot({
+      name: 'Account API App',
+      info: { title: 'Account API App', version: PACKAGE_VERSION },
+      types: [
+        ...Object.values(models),    // Entity ve enum modelleri
+        CreateAccountInDto,            // DTO'lar ayri eklenir
+        UpdateAccountInDto,
+      ],
+      controllers: Object.values(controllers),
+      schemaIsPublic: true,
+    }),
+  ],
+  providers: [JwtStrategy],
+})
+export class ApiModule {}
+```
+
+**Onemli:** Yeni bir DTO olusturuldiginda `types` dizisine eklenmesi gerekir.
+
+### 7.3 Barrel Export Yapisi
+
+Her controller klasoru ve services klasoru bir `index.ts` dosyasi icerir:
+
+```typescript
+// controllers/<resource>/index.ts
+export * from './<resource>.controller.js';
+export * from './<resource>-single.controller.js';
+
+// controllers/index.ts
+export * from './account/index.js';
+export * from './user/index.js';
+export * from './healthz.controller.js';
+// ...
+```
+
+Import path'lerinde `.js` uzantisi kullanilir (ESM gerekliligi).
+
+---
+
+## 8. RESPONSE YAPISI
+
+### Standart CRUD Response
+
+- **Get/Create/Update**: Entity objesi dogrudan dondurulur
+- **Delete**: Silinen kaydin id'si dondurulur
+- **FindMany (count yok)**: Entity dizisi dogrudan dondurulur
+- **FindMany (count var)**: `OperationResult` kullanilir
+
+```typescript
 import { OperationResult } from '@opra/common';
 
-// Liste + toplam sayı
+// Paginated response
 return new OperationResult({
   payload: items,
   totalMatches: count,
 });
 
-// Sadece mesaj
-return new OperationResult({ message: 'İşlem başarılı' });
+// Custom operation response
+return new OperationResult({
+  message: 'Success',
+  payload: result,
+});
 ```
 
 ---
 
-## 11. OmitType — Kısmi Tip Oluşturma
+## 9. YENI RESOURCE EKLEME ADIMLARI
 
-Create operasyonlarında `_id` gibi server-taraflı alanları body'den çıkarmak için:
+Yeni bir resource (ornek: `Product`) eklemek icin sirasi ile:
 
-```ts
-import { OmitType } from '@opra/common';
+### Adim 1: Entity tanimla
+`packages/data-models/src/entities/product.entity.ts` olustur.
+`@ComplexType`, `@Entity`, `@PrimaryKey`, `@Column`, `@ApiField` dekoratorlerini kullan.
+`packages/data-models/src/entities/index.ts`'e export ekle.
 
-@HttpOperation.Entity.Create(Customer, {
-  requestBody: {
-    type: OmitType(Customer, ['_id', 'createdAt', 'updatedAt']),
-  },
-})
-async create(context: HttpContext) { ... }
-```
+### Adim 2: (Opsiyonel) Enum tanimla
+`packages/data-models/src/enums/` altinda enum dosyasi olustur.
+`EnumType()` ile kayit et. Index'e export ekle.
 
----
+### Adim 3: Service olustur
+`packages/<app>/src/modules/services/services/product.service.ts` olustur.
+`SqbCollectionService<EntityProduct>` extend et.
+`services/index.ts`'e export ekle.
 
-## 12. Veri Tipleri Tanımlama
+### Adim 4: DTO olustur
+`packages/<app>/src/modules/api/controllers/product/dto/` altinda DTO'lari olustur.
+`@ComplexType` ve `@ApiField` kullan.
 
-```ts
-import { ComplexType, ApiField, ArrayType } from '@opra/common';
+### Adim 5: Collection Controller olustur
+`product.controller.ts` — FindMany + Create operasyonlari.
+Path: cogul (`products`).
 
-@ComplexType()
-export class Customer {
-  @ApiField({ required: true })
-  declare _id: number;
+### Adim 6: Single Controller olustur
+`product-single.controller.ts` — Get + Update + Delete operasyonlari.
+Path: tekil (`product`), `.KeyParam('id')` ile.
 
-  @ApiField({ required: true })
-  declare name: string;
+### Adim 7: Controller index'e ekle
+`controllers/product/index.ts` ve `controllers/index.ts` dosyalarini guncelle.
 
-  @ApiField({ type: ArrayType(String) })
-  tags?: string[];
+### Adim 8: API Module'e DTO kaydet
+`api.module.ts`'deki `OpraHttpModule.forRoot({ types: [...] })` dizisine yeni DTO'lari ekle.
 
-  @ApiField({ type: 'date' })
-  birthDate?: Date;
-}
-```
-
----
-
-## 13. Ham HTTP Metot Decorator'ları
-
-`Entity.*` kullanmak yerine ham metot belirtmek gerektiğinde:
-
-```ts
-@HttpOperation.GET({ path: 'ping' })
-async ping() { return { ok: true }; }
-
-@HttpOperation.POST({ path: 'process' })
-async process(context: HttpContext) { ... }
-
-@HttpOperation.PUT({})
-async replace(context: HttpContext) { ... }
-
-@HttpOperation.DELETE({ path: 'purge' })
-async purge(context: HttpContext) { ... }
-```
+### Adim 9: DB Migration olustur
+`packages/db-migrator/src/migrations/` altinda tablo olusturma migration'i ekle.
 
 ---
 
-## Hızlı Başvuru — Ne Zaman Ne Kullanılır?
+## 10. IMPORT REFERANSI
 
-| Senaryo | Kullan |
-|---------|--------|
-| Koleksiyon (liste, oluştur, toplu güncelle) | `CustomersController` kalıbı + `Entity.FindMany/Create/UpdateMany/DeleteMany` |
-| Tekil kaynak (getir, güncelle, sil) | `CustomerController` kalıbı + `.KeyParam()` + `Entity.Get/Update/Delete` |
-| Sabit tekil kaynak (profil gibi) | `MyProfileController` kalıbı (KeyParam yok) + `Entity.Get/Update/Delete` |
-| Serbest endpoint (login, export vb.) | `HttpOperation({ path })` + `.QueryParam/.Response` zinciri |
-| Dosya yükleme | `HttpOperation.POST().MultipartContent()` + `context.getMultipartReader()` |
-| Alt kaynak (müşterinin notları) | Nested controller + `controllers` array + `context.pathParams.parentId` |
+```typescript
+// OPRA Common — Dekoratorler ve tipler
+import { HttpController, HttpOperation, OperationResult, ApiField, ComplexType, StringType, EnumType } from '@opra/common';
+
+// OPRA HTTP — Context
+import { HttpContext } from '@opra/http';
+
+// OPRA SQB — Adapter
+import { SQBAdapter, SqbCollectionService, SqbEntityService } from '@opra/sqb';
+
+// OPRA NestJS — Public dekoratoru
+import { Public as OpraPublic } from '@opra/nestjs';
+
+// SQB Connect — ORM dekoratorleri
+import { Column, DataType, Entity, Link, PrimaryKey } from '@sqb/connect';
+import { SqbClient } from '@sqb/connect';
+
+// SQB Builder — Query builder
+import { op } from '@sqb/builder';
+import { And, Eq, Exists, Field, Select } from '@sqb/builder';
+
+// NestJS
+import { Injectable } from '@nestjs/common';
+import { Global, Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+
+// Core — JWT guard
+import { Public } from '@panates-prv/account-core';
+
+// Data Models
+import { EntityAccount, EntityUser, ... } from '@panates-prv/account-data-models';
+import { models } from '@panates-prv/account-data-models';

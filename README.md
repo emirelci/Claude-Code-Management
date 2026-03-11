@@ -15,7 +15,6 @@ Claude Code yaptığımız işleri hızlandıracak, yazdığımız kodun ortak b
 
 Bu repo'nun file structer; 
 
-Claude-Code-Management/
 ├── .claude/
 │   ├── agents/
 │   │   └── security-reviewer.md
@@ -31,7 +30,8 @@ Claude-Code-Management/
 │   │   └── react-typescript/
 │   │       └── SKILL.md
 │   └── CLAUDE.md
-└── README.md  
+└── README.md
+
 
 
 CLAUDE.md ne işe yarar ? 
