@@ -3,11 +3,13 @@ name: new-component
 description: rx-peacox kütüphanesine yeni bir React bileşeni ekle. Bileşen dosyası, stil variants dosyası ve Storybook stories dosyası oluşturur; tüm proje konvansiyonlarına (tailwind-variants, pcx: prefix, Ant Design, Storybook) uyar.
 argument-hint: <ComponentName> [açıklama]
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
+disable-model-invocation: true
 ---
 
 # rx-peacox: Yeni Bileşen Oluştur
 
-`$ARGUMENTS` argümanından bileşen adını al. İlk kelime bileşen adı (`$0`), geri kalanı opsiyonel açıklama.
+`$ARGUMENTS` argümanından bileşen adını al. İlk kelime bileşen adı, geri kalanı opsiyonel açıklama.
+Aşağıdaki tüm adımlarda `{ComponentName}` yerine bu bileşen adını kullan.
 
 ## 1. Önce Mevcut Yapıyı İncele
 
@@ -20,7 +22,7 @@ Başlamadan önce şunları oku:
 
 ## 2. Oluşturulacak Dosyalar
 
-### `src/components/$0/$0.tsx`
+### `src/components/{ComponentName}/{ComponentName}.tsx`
 
 Ana bileşen dosyası. Şu kurallara uy:
 
@@ -29,17 +31,17 @@ Ana bileşen dosyası. Şu kurallara uy:
 import { ... } from "antd";                          // Ant Design bileşenleri (gerekirse)
 import { ... } from "@ant-design/icons";             // İkonlar (gerekirse)
 import { type ReactNode } from "react";
-import { wrapper, ... } from "./$0.variants";        // Stil fonksiyonları
+import { wrapper, ... } from "./{ComponentName}.variants";  // Stil fonksiyonları
 
 // Props interface: "I" prefix YOK, sadece Props suffix
-interface $0Props {
+interface {ComponentName}Props {
   className?: string;
   children?: ReactNode;
   // ... diğer proplar
 }
 
 // Named export kullan (default export YOK)
-export function $0({ className, children, ...props }: $0Props) {
+export function {ComponentName}({ className, children, ...props }: {ComponentName}Props) {
   return (
     <div className={`${wrapper()} ${className ?? ""}`}>
       {children}
@@ -50,12 +52,12 @@ export function $0({ className, children, ...props }: $0Props) {
 
 **Kurallar:**
 - `export default` KULLANMA — sadece named export
-- Props tipi `interface` olarak tanımla, `src/components/$0/index.ts`'ten export et
+- Props tipi `interface` olarak tanımla, `src/components/{ComponentName}/index.ts`'ten export et
 - Inline Tailwind class kullanırsan `pcx:` prefix ZORUNLU (örn: `pcx:flex pcx:gap-2`)
 - Ant Design bileşenlerini doğrudan kullan (sarmalamak zorunda değilsin)
 - Türkçe string sabitleri kullanabilirsin (proje dili Türkçe)
 
-### `src/components/$0/$0.variants.ts`
+### `src/components/{ComponentName}/{ComponentName}.variants.ts`
 
 Tüm stiller `tailwind-variants` (`tv()`) ile tanımlanır:
 
@@ -101,15 +103,15 @@ export const myComponent = tv({
 - `tailwind-merge` gerekirse import et: `import { twMerge } from "tailwind-merge"`
 - Renk değerleri için Tailwind token'ları tercih et, zorunluysa `[]` arbitrary kullan
 
-### `src/components/$0/$0.stories.tsx`
+### `src/components/{ComponentName}/{ComponentName}.stories.tsx`
 
 ```tsx
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import { $0 } from "./$0";
+import { {ComponentName} } from "./{ComponentName}";
 
-const meta: Meta<typeof $0> = {
-  title: "$0/$0",          // klasör/isim formatı
-  component: $0,
+const meta: Meta<typeof {ComponentName}> = {
+  title: "{ComponentName}/{ComponentName}",  // klasör/isim formatı
+  component: {ComponentName},
   tags: ["autodocs"],
   parameters: {
     layout: "centered",
@@ -121,7 +123,7 @@ const meta: Meta<typeof $0> = {
 };
 
 export default meta;
-type Story = StoryObj<typeof $0>;
+type Story = StoryObj<typeof {ComponentName}>;
 
 export const Default: Story = {
   args: {
@@ -138,10 +140,10 @@ export const Default: Story = {
 - Her önemli variant için ayrı story yaz
 - State'li bileşenler için `render: (args) => { const [x, setX] = useState(...); return <.../>; }` kullan
 
-### `src/components/$0/index.ts`
+### `src/components/{ComponentName}/index.ts`
 
 ```ts
-export * from "./$0";
+export * from "./{ComponentName}";
 ```
 
 ## 3. Mevcut Export'a Ekle
@@ -149,7 +151,7 @@ export * from "./$0";
 `src/components/index.ts` dosyasına ekle:
 
 ```ts
-export * from './$0'
+export * from './{ComponentName}'
 ```
 
 ## 4. Kalite Kontrol
